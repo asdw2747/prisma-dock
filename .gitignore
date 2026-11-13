@@ -1,0 +1,5 @@
+/target
+/apps
+/data
+*.part
+.DS_Store
