@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -29,15 +30,22 @@ pub struct ManifestLoad {
 
 impl AppPaths {
     pub fn resolve() -> Self {
-        let base = std::env::var_os("PRISMA_DOCK_HOME")
+        let prisma_home = std::env::var_os("PRISMA_DOCK_HOME")
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|path| path.parent().map(Path::to_path_buf))
-            })
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            .map(PathBuf::from);
+        let appimage_base = appimage_base_from(std::env::var_os("APPIMAGE").as_deref());
+        let current_exe = std::env::current_exe().ok();
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let fallback = local_data_base();
+
+        let base = resolve_base(
+            prisma_home,
+            appimage_base,
+            current_exe,
+            current_dir,
+            fallback,
+            base_is_writable,
+        );
 
         Self::from_base(base)
     }
@@ -237,6 +245,107 @@ impl AppPaths {
     }
 }
 
+fn resolve_base(
+    prisma_home: Option<PathBuf>,
+    appimage_base: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+    current_dir: PathBuf,
+    fallback: PathBuf,
+    is_writable: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    let candidate = prisma_home
+        .or(appimage_base)
+        .or_else(|| {
+            current_exe
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .filter(|path| !path.as_os_str().is_empty())
+        })
+        .unwrap_or(current_dir);
+
+    if is_writable(&candidate) {
+        candidate
+    } else {
+        fallback
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn appimage_base_from(value: Option<&OsStr>) -> Option<PathBuf> {
+    let value = value.filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn appimage_base_from(_value: Option<&OsStr>) -> Option<PathBuf> {
+    None
+}
+
+fn local_data_base() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(directory) = dirs::data_local_dir() {
+            return directory.join("PrismaDock");
+        }
+        if let Some(home) = dirs::home_dir() {
+            return home.join("AppData").join("Local").join("PrismaDock");
+        }
+        PathBuf::from("PrismaDock")
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(directory) = dirs::data_local_dir() {
+            return directory.join("prisma-dock");
+        }
+        if let Some(home) = dirs::home_dir() {
+            return home.join(".local").join("share").join("prisma-dock");
+        }
+        PathBuf::from("prisma-dock")
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("PrismaDock")
+    }
+}
+
+fn base_is_writable(base: &Path) -> bool {
+    if fs::create_dir_all(base).is_err() {
+        return false;
+    }
+
+    let probe = base.join(format!(
+        ".prisma-dock-write-test-{}-{}.tmp",
+        std::process::id(),
+        time_nonce()
+    ));
+    match OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(file) => {
+            drop(file);
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn time_nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
 pub fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
@@ -272,10 +381,7 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), Stri
             .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
     }
 
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
+    let nonce = time_nonce();
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -325,6 +431,9 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), Stri
 mod tests {
     use super::*;
     use crate::model::{AppEntry, LaunchTarget};
+
+    #[cfg(target_os = "linux")]
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn test_app() -> Manifest {
         Manifest {
@@ -442,5 +551,93 @@ mod tests {
         let portable = portable_path_string(&path);
         assert!(portable.starts_with("~/"), "{portable}");
         assert!(portable.ends_with("Desktop/Tool.AppImage"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_path_uses_parent_directory() {
+        let base = appimage_base_from(Some(OsStr::new("/tmp/test-dir/PrismaDock.AppImage")));
+        assert_eq!(base, Some(PathBuf::from("/tmp/test-dir")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_environment_resolves_next_to_the_appimage() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_appimage = std::env::var_os("APPIMAGE");
+        let old_home = std::env::var_os("PRISMA_DOCK_HOME");
+        let temp = tempfile::tempdir().unwrap();
+        let appimage = temp.path().join("PrismaDock.AppImage");
+
+        unsafe {
+            std::env::set_var("APPIMAGE", &appimage);
+            std::env::remove_var("PRISMA_DOCK_HOME");
+        }
+        let resolved = AppPaths::resolve();
+        unsafe {
+            match old_appimage {
+                Some(value) => std::env::set_var("APPIMAGE", value),
+                None => std::env::remove_var("APPIMAGE"),
+            }
+            match old_home {
+                Some(value) => std::env::set_var("PRISMA_DOCK_HOME", value),
+                None => std::env::remove_var("PRISMA_DOCK_HOME"),
+            }
+        }
+
+        assert_eq!(resolved.base, temp.path());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_base_precedes_current_exe() {
+        let appimage_base =
+            appimage_base_from(Some(OsStr::new("/tmp/test-dir/PrismaDock.AppImage")));
+        let resolved = resolve_base(
+            None,
+            appimage_base,
+            Some(PathBuf::from("/usr/bin/prisma-dock")),
+            PathBuf::from("/tmp/cwd"),
+            PathBuf::from("/tmp/fallback-data"),
+            |_| true,
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/test-dir"));
+    }
+
+    #[test]
+    fn prisma_home_precedes_appimage() {
+        let resolved = resolve_base(
+            Some(PathBuf::from("/tmp/portable-home")),
+            Some(PathBuf::from("/tmp/test-dir")),
+            Some(PathBuf::from("/usr/bin/prisma-dock")),
+            PathBuf::from("/tmp/cwd"),
+            PathBuf::from("/tmp/fallback-data"),
+            |_| true,
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/portable-home"));
+    }
+
+    #[test]
+    fn unwritable_base_uses_local_data_fallback() {
+        let fallback = PathBuf::from("/tmp/fallback-data");
+        let resolved = resolve_base(
+            None,
+            Some(PathBuf::from("/tmp/test-dir")),
+            Some(PathBuf::from("/usr/bin/prisma-dock")),
+            PathBuf::from("/tmp/cwd"),
+            fallback.clone(),
+            |_| false,
+        );
+        assert_eq!(resolved, fallback);
+    }
+
+    #[test]
+    fn writable_probe_distinguishes_files_from_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(base_is_writable(temp.path()));
+
+        let file = temp.path().join("not-a-directory");
+        std::fs::write(&file, b"data").unwrap();
+        assert!(!base_is_writable(&file));
     }
 }

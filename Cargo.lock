@@ -2769,7 +2769,7 @@ dependencies = [
 
 [[package]]
 name = "prisma-dock"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "dirs",
  "eframe",

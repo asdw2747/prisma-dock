@@ -60,7 +60,19 @@ The release binary uses the Windows GUI subsystem, so it does not open a console
 
 ## Portable layout
 
-Prisma Dock resolves its data directory from the executable's location, not the current working directory:
+Prisma Dock resolves its portable base directory in this order:
+
+1. `PRISMA_DOCK_HOME`, if set and non-empty.
+2. On Linux, the directory containing the running `.AppImage` (from the `APPIMAGE` environment variable).
+3. The directory containing the executable.
+4. The current working directory if the executable path cannot be determined.
+
+If the selected directory is not writable — for example, an AppImage’s read-only SquashFS mount or `/usr/bin` — Prisma Dock falls back to the platform user-data directory:
+
+- Linux: `$XDG_DATA_HOME/prisma-dock` or `~/.local/share/prisma-dock`
+- Windows: `%LOCALAPPDATA%\PrismaDock`
+
+The footer always shows the active data directory.
 
 ```text
 PrismaDock/
@@ -322,7 +334,7 @@ cargo xwin check --target x86_64-pc-windows-msvc
 | Launch fails with permission denied on Linux | Make the target executable (`chmod +x`). Downloads are made executable automatically. |
 | Python venv error | Point `venv_path` at the folder containing `bin/python` or `Scripts/python.exe`. |
 | Window will not start on Linux | Install GTK3/X11/Wayland runtime libraries; `rfd` uses the native GTK dialog backend. |
-| App data cannot be written | Keep the portable folder somewhere writable; data is stored next to the executable. |
+| App data cannot be written | Prisma Dock falls back to the OS user-data directory when the portable/AppImage folder is read-only. Check the data path shown in the footer. |
 
 ## License
 
