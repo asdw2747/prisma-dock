@@ -64,6 +64,15 @@ const KNOWN_APPS: &[KnownApp] = &[
         version: "1.1.0",
         aliases: &["matrixtrack", "matrix-track", "matrix_track"],
     },
+    KnownApp {
+        id: "surroundtag",
+        name: "SurroundTag",
+        description: "Tag and embed cover art in 5.1 Matroska audio without re-encoding.",
+        category: "Audio",
+        repo: "asdw2747/surround-tag",
+        version: "1.0.0",
+        aliases: &["surroundtag", "surround-tag", "surround_tag"],
+    },
 ];
 
 pub fn starter_manifest(base: &Path, platform: Platform) -> (Manifest, usize) {
@@ -467,10 +476,10 @@ mod tests {
     }
 
     #[test]
-    fn starter_manifest_has_exact_five_apps_and_repos() {
+    fn starter_manifest_has_exact_six_apps_and_repos() {
         let temp = tempfile::tempdir().unwrap();
         let (manifest, _) = starter_manifest(temp.path(), Platform::Linux);
-        assert_eq!(manifest.apps.len(), 5);
+        assert_eq!(manifest.apps.len(), 6);
 
         let expected = [
             ("comiccrate", "ComicCrate", "asdw2747/comic-crate"),
@@ -482,6 +491,7 @@ mod tests {
             ),
             ("jxlerate", "JXLerate", "asdw2747/JXLerate"),
             ("matrix-track", "MatrixTrack", "asdw2747/MatrixTrack"),
+            ("surroundtag", "SurroundTag", "asdw2747/surround-tag"),
         ];
         for (app, (id, name, repo)) in manifest.apps.iter().zip(expected) {
             assert_eq!(app.id, id);
@@ -494,6 +504,13 @@ mod tests {
         assert_eq!(
             matrix_track.description,
             "Multi-channel audio visualizer for surround mapping and phase checks."
+        );
+
+        let surround_tag = &manifest.apps[5];
+        assert_eq!(surround_tag.category, "Audio");
+        assert_eq!(
+            surround_tag.description,
+            "Tag and embed cover art in 5.1 Matroska audio without re-encoding."
         );
     }
 

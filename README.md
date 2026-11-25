@@ -9,6 +9,7 @@ Built with `eframe`/`egui`. There is no web view, and HTTP uses `rustls`, so no 
 ## Features
 
 - Dark, responsive card dashboard with installed/latest version badges.
+- Per-app icons extracted automatically from AppImages, Windows executables, and embedded native icons, with a right-click override.
 - One-click **Launch**, **Install**, and **Update** actions.
 - GitHub Releases checks in a background worker, with an optional startup check.
 - Automatic discovery of new public `asdw2747` repositories with published releases.
@@ -80,6 +81,7 @@ PrismaDock/
   data/
     apps.json          # app registry (created on first launch)
     settings.json      # token, remote URL, auto-check toggle
+    icons/             # custom icons and the automatic icon cache
   apps/
     comiccrate/        # downloaded releases and local app folders
     reelrename/
@@ -103,6 +105,7 @@ On first launch, Prisma Dock writes a starter manifest containing:
 | Haunted Files | Files | `asdw2747/haunted-files-py` | `1.0.0` |
 | JXLerate | Media | `asdw2747/JXLerate` | `2.4.4` |
 | MatrixTrack | Audio | `asdw2747/MatrixTrack` | `1.1.0` |
+| SurroundTag | Audio | `asdw2747/surround-tag` | `1.0.0` |
 
 The first run also performs a best-effort local discovery in the portable `apps/` folder, the Desktop, Downloads, `~/Applications`, `~/.local/bin`, `~/bin`, and (on Windows) `%LOCALAPPDATA%\Programs` plus the Program Files directories. It searches depth-limited for matching `.AppImage`, `.exe`, and extensionless executables, then saves any paths it finds. Discovery only runs when `apps.json` is created; later changes are made through **Add App** or by editing the manifest.
 
@@ -166,7 +169,7 @@ The first run also performs a best-effort local discovery in the portable `apps/
 | `category` | no | Free-form label; defaults to `Other`. `Media`, `Files`, `Comics`, `Images`, `Audio`, and `Tools` get distinct chip colors. |
 | `repo` | no | `"owner/repo"` used for GitHub Releases. `null` disables update checks for the app. |
 | `installed_version` | no | Local version string or `null`. Tags such as `v1.2.3` are normalized when comparing. |
-| `icon_path` | no | Absolute path or path relative to the portable base directory. PNG, JPEG, and ICO are supported. Falls back to an initials tile. |
+| `icon_path` | no | Absolute path or path relative to the portable base directory. PNG, JPEG, and ICO are supported. When omitted, Prisma Dock tries the app's embedded icon, an icon beside the launch target, or an XDG theme icon, then falls back to an initials tile. |
 | `windows` | no | Windows launch target. |
 | `linux` | no | Linux launch target. |
 
@@ -195,6 +198,8 @@ Path rules:
 - Relative binary paths, script paths, and venv paths resolve under `apps/<id>/`.
 - Auto-discovered and scanned files under your home directory are stored as `~/...` when possible, so a manifest copied to another machine has a better chance of resolving.
 - `icon_path` relative paths resolve under the portable base directory, so `data/icons/tool.png` works.
+- When `icon_path` is omitted, Prisma Dock reads the AppImage's `.DirIcon`, a Windows `.exe`'s embedded icon resource, an `icon.png`/`<name>.png` beside the launch target, a matching XDG icon, or a square PNG embedded in a native ELF binary. Extracted icons are cached as PNGs under `data/icons/auto/`; the cache follows the installed target and is rebuilt after updates.
+- To override an automatic icon, right-click the card icon and choose **Choose icon…**. The selected image is copied to `data/icons/<app-id>.<ext>` and written to `icon_path`. Choose **Use automatic icon** to remove the override.
 - With a venv, the interpreter is `Scripts/python.exe` on Windows or `bin/python` on Unix. Set `"windowless": true` to use `Scripts/pythonw.exe` instead on Windows. A configured but broken venv is an error rather than a silent fallback to global Python.
 - Without a venv, launching uses `python` (or `pythonw` when windowless) on Windows and `python3` on Linux.
 - `.pyw` files discovered through **Add App** are automatically marked windowless.
@@ -300,7 +305,7 @@ The remote file is only app definitions. Settings and tokens stay local to each 
 
 Detected `.exe` files go into the `windows` section and `.AppImage` files into `linux`, so a manifest edited on one machine remains useful on the other. Python entries are added for the current platform. Existing paths are deduplicated.
 
-The starter manifest includes MatrixTrack as the fully configured fifth app. Use **Add App** for any additional utilities.
+The starter manifest includes MatrixTrack and SurroundTag as the configured audio apps. Use **Add App** for any additional utilities.
 
 ## Reloading the manifest
 

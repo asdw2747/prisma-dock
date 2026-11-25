@@ -346,6 +346,8 @@ impl PrismaDockApp {
                 CardAction::Configure => self.edit_manifest(),
                 CardAction::Check => self.start_check_all(),
                 CardAction::CancelInstall => self.cancel_install(),
+                CardAction::ChooseIcon(app_id) => self.choose_icon(&app_id),
+                CardAction::ClearIcon(app_id) => self.clear_icon(&app_id),
             }
         }
     }

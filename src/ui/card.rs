@@ -25,6 +25,8 @@ pub enum CardAction {
     Configure,
     Check,
     CancelInstall,
+    ChooseIcon(String),
+    ClearIcon(String),
 }
 
 pub fn show(ui: &mut egui::Ui, view: &CardView, width: f32, height: f32) -> Vec<CardAction> {
@@ -61,7 +63,7 @@ fn card_content(ui: &mut egui::Ui, view: &CardView, actions: &mut Vec<CardAction
     );
 
     ui.horizontal(|ui| {
-        app_icon(ui, view);
+        app_icon(ui, view, actions);
         ui.add_space(2.0);
         ui.vertical(|ui| {
             ui.add(egui::Label::new(RichText::new(&app.name).size(16.0).strong()).truncate());
@@ -336,17 +338,21 @@ fn card_note(
     None
 }
 
-fn app_icon(ui: &mut egui::Ui, view: &CardView) {
+fn app_icon(ui: &mut egui::Ui, view: &CardView, actions: &mut Vec<CardAction>) {
     let size = Vec2::splat(42.0);
     if let Some(texture) = &view.icon {
-        ui.add(
-            egui::Image::new(egui::load::SizedTexture::new(texture.id(), size))
-                .corner_radius(CornerRadius::same(10)),
-        );
+        let response = ui
+            .add(
+                egui::Image::new(egui::load::SizedTexture::new(texture.id(), size))
+                    .corner_radius(CornerRadius::same(10))
+                    .sense(Sense::click()),
+            )
+            .on_hover_text("Right-click to change this icon.");
+        icon_menu(&response, view, actions);
         return;
     }
 
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let accent = theme::app_accent(&view.app.name);
     ui.painter()
         .rect_filled(rect, CornerRadius::same(10), accent);
@@ -357,6 +363,21 @@ fn app_icon(ui: &mut egui::Ui, view: &CardView) {
         FontId::proportional(15.0),
         Color32::from_rgb(12, 10, 20),
     );
+    let response = response.on_hover_text("Right-click to choose an icon.");
+    icon_menu(&response, view, actions);
+}
+
+fn icon_menu(response: &egui::Response, view: &CardView, actions: &mut Vec<CardAction>) {
+    response.context_menu(|ui| {
+        if ui.button("Choose icon…").clicked() {
+            actions.push(CardAction::ChooseIcon(view.app.id.clone()));
+            ui.close();
+        }
+        if view.app.icon_path.is_some() && ui.button("Use automatic icon").clicked() {
+            actions.push(CardAction::ClearIcon(view.app.id.clone()));
+            ui.close();
+        }
+    });
 }
 
 fn badge(ui: &mut egui::Ui, text: &str, fg: Color32, bg: Color32) -> egui::Response {

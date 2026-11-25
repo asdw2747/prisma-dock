@@ -3,6 +3,7 @@
 mod app;
 mod discover;
 mod github;
+mod icons;
 mod installer;
 mod launch;
 mod model;

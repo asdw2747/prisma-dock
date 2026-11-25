@@ -3,8 +3,10 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 
 use crate::github::{self, DiscoveredRepo, ReleaseInfo};
+use crate::icons;
 use crate::installer::{self, InstallEvent, InstallRequest, InstalledArtifact};
-use crate::model::Manifest;
+use crate::model::{AppEntry, Manifest, Platform};
+use crate::paths::AppPaths;
 
 #[derive(Debug, Clone)]
 pub struct CheckRequest {
@@ -19,6 +21,11 @@ pub enum Command {
         token: Option<String>,
     },
     Install(InstallRequest),
+    ExtractIcons {
+        paths: AppPaths,
+        platform: Platform,
+        apps: Vec<AppEntry>,
+    },
     SyncManifest {
         url: String,
         token: Option<String>,
@@ -51,6 +58,10 @@ pub enum Event {
     InstallResult {
         app_id: String,
         result: Result<InstalledArtifact, String>,
+    },
+    IconReady {
+        app_id: String,
+        path: Option<std::path::PathBuf>,
     },
     SyncResult {
         result: Result<Manifest, String>,
@@ -198,6 +209,24 @@ fn worker_loop(commands: Receiver<Command>, events: Sender<Event>) {
                     .is_err()
                 {
                     return;
+                }
+            }
+            Command::ExtractIcons {
+                paths,
+                platform,
+                apps,
+            } => {
+                for app in apps {
+                    let path = icons::auto_icon_path(&paths, &app, platform);
+                    if events
+                        .send(Event::IconReady {
+                            app_id: app.id,
+                            path,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
             Command::SyncManifest { url, token } => {

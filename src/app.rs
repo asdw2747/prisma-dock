@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::TryRecvError;
@@ -10,6 +10,7 @@ use eframe::egui::{self, TextureHandle, TextureOptions};
 
 use crate::discover;
 use crate::github::{self, ReleaseInfo};
+use crate::icons;
 use crate::installer::{CANCELED_MESSAGE, InstallRequest};
 use crate::launch;
 use crate::model::{AppEntry, Manifest, Platform, Settings, valid_id};
@@ -100,6 +101,8 @@ pub struct PrismaDockApp {
     pub(crate) startup_error: Option<String>,
     pub(crate) icon: Option<TextureHandle>,
     pub(crate) icon_cache: HashMap<String, Option<TextureHandle>>,
+    pub(crate) auto_icons: HashMap<String, PathBuf>,
+    pending_icons: HashSet<String>,
     pub(crate) add_modal: Option<ui::add_app::AddAppModal>,
     pub(crate) settings_modal: Option<ui::settings::SettingsModal>,
     pub(crate) discovery_added: usize,
@@ -145,6 +148,8 @@ impl PrismaDockApp {
             startup_error: (!errors.is_empty()).then(|| errors.join("\n")),
             icon,
             icon_cache: HashMap::new(),
+            auto_icons: HashMap::new(),
+            pending_icons: HashSet::new(),
             add_modal: None,
             settings_modal: None,
             discovery_added: 0,
@@ -170,6 +175,7 @@ impl PrismaDockApp {
             };
         }
 
+        app.queue_missing_icons();
         app
     }
 
@@ -202,6 +208,46 @@ impl PrismaDockApp {
         self.runtime.retain(|id, _| ids.contains(id));
         for app in &self.manifest.apps {
             self.runtime.entry(app.id.clone()).or_default();
+        }
+    }
+
+    fn queue_missing_icons(&mut self) {
+        let apps: Vec<AppEntry> = self
+            .manifest
+            .apps
+            .iter()
+            .filter(|app| app.icon_path.is_none() && !self.pending_icons.contains(&app.id))
+            .cloned()
+            .collect();
+        self.queue_icons(apps);
+    }
+
+    fn queue_app_icon(&mut self, app_id: &str) {
+        if let Some(app) = self.manifest.app(app_id).cloned() {
+            self.queue_icons(vec![app]);
+        }
+    }
+
+    fn queue_icons(&mut self, apps: Vec<AppEntry>) {
+        let apps: Vec<AppEntry> = apps
+            .into_iter()
+            .filter(|app| app.icon_path.is_none() && !self.pending_icons.contains(&app.id))
+            .collect();
+        if apps.is_empty() {
+            return;
+        }
+
+        for app in &apps {
+            self.pending_icons.insert(app.id.clone());
+        }
+        if let Err(error) = self.worker.send(Command::ExtractIcons {
+            paths: self.paths.clone(),
+            platform: self.platform,
+            apps,
+        }) {
+            self.pending_icons.clear();
+            self.worker_dead = true;
+            self.notify(StatusKind::Error, error);
         }
     }
 
@@ -413,6 +459,89 @@ impl PrismaDockApp {
         }
     }
 
+    pub(crate) fn choose_icon(&mut self, app_id: &str) {
+        let Some(app) = self.manifest.app(app_id).cloned() else {
+            self.notify(StatusKind::Error, "That app is no longer in apps.json.");
+            return;
+        };
+        let Some(source) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "ico"])
+            .set_title(format!("Choose an icon for {}", app.name))
+            .pick_file()
+        else {
+            return;
+        };
+
+        let relative = match icons::install_custom_icon(&self.paths, &app.id, &source) {
+            Ok(relative) => relative,
+            Err(error) => {
+                self.notify(StatusKind::Error, error);
+                return;
+            }
+        };
+
+        let previous = app.icon_path.clone();
+        if let Some(entry) = self.manifest.app_mut(app_id) {
+            entry.icon_path = Some(relative.clone());
+        }
+        self.pending_icons.remove(app_id);
+        self.auto_icons.remove(app_id);
+        self.icon_cache.clear();
+
+        match self.paths.save_manifest(&self.manifest) {
+            Ok(()) => self.notify(
+                StatusKind::Success,
+                format!("Updated the icon for {}.", app.name),
+            ),
+            Err(error) => {
+                if let Some(entry) = self.manifest.app_mut(app_id) {
+                    entry.icon_path = previous;
+                }
+                self.icon_cache.clear();
+                self.notify(StatusKind::Error, error);
+            }
+        }
+    }
+
+    pub(crate) fn clear_icon(&mut self, app_id: &str) {
+        let Some(app) = self.manifest.app(app_id).cloned() else {
+            self.notify(StatusKind::Error, "That app is no longer in apps.json.");
+            return;
+        };
+        if app.icon_path.is_none() {
+            self.notify(
+                StatusKind::Info,
+                "That app already uses its automatic icon.",
+            );
+            return;
+        }
+
+        let previous = app.icon_path.clone();
+        if let Some(entry) = self.manifest.app_mut(app_id) {
+            entry.icon_path = None;
+        }
+        self.auto_icons.remove(app_id);
+        self.pending_icons.remove(app_id);
+        self.icon_cache.clear();
+
+        match self.paths.save_manifest(&self.manifest) {
+            Ok(()) => {
+                self.queue_app_icon(app_id);
+                self.notify(
+                    StatusKind::Success,
+                    format!("Using the automatic icon for {}.", app.name),
+                );
+            }
+            Err(error) => {
+                if let Some(entry) = self.manifest.app_mut(app_id) {
+                    entry.icon_path = previous;
+                }
+                self.icon_cache.clear();
+                self.notify(StatusKind::Error, error);
+            }
+        }
+    }
+
     pub(crate) fn open_add_modal(&mut self) {
         self.settings_modal = None;
         self.add_modal = Some(ui::add_app::AddAppModal::new());
@@ -431,6 +560,7 @@ impl PrismaDockApp {
         let mut ids: BTreeSet<String> = self.manifest.ids().into_iter().collect();
         let mut added = 0usize;
         let mut duplicates = 0usize;
+        let mut added_ids = Vec::new();
 
         for draft in drafts {
             let mut candidate = draft.candidate;
@@ -473,6 +603,7 @@ impl PrismaDockApp {
             ids.insert(id.clone());
 
             let entry = scan::entry_from_candidate(&candidate, id, name, category);
+            added_ids.push(entry.id.clone());
             self.manifest.apps.push(entry);
             added += 1;
         }
@@ -496,6 +627,14 @@ impl PrismaDockApp {
                 StatusKind::Info,
                 format!("All {duplicates} selected app(s) were already registered."),
             );
+        }
+
+        if !added_ids.is_empty() {
+            let apps = added_ids
+                .iter()
+                .filter_map(|id| self.manifest.app(id).cloned())
+                .collect();
+            self.queue_icons(apps);
         }
     }
 
@@ -570,6 +709,8 @@ impl PrismaDockApp {
         self.runtime.clear();
         self.sync_runtime();
         self.icon_cache.clear();
+        self.auto_icons.clear();
+        self.pending_icons.clear();
         self.add_modal = None;
         self.settings_modal = None;
 
@@ -589,6 +730,7 @@ impl PrismaDockApp {
                 format!("Reloaded {} app(s).", self.manifest.apps.len()),
             );
         }
+        self.queue_missing_icons();
     }
 
     pub(crate) fn edit_manifest(&mut self) {
@@ -617,7 +759,7 @@ impl PrismaDockApp {
     }
 
     pub(crate) fn needs_repaint(&self) -> bool {
-        self.worker_busy
+        self.worker_busy || !self.pending_icons.is_empty()
     }
 
     fn poll_worker(&mut self) {
@@ -826,6 +968,9 @@ impl PrismaDockApp {
                         if let Some(runtime) = self.runtime.get_mut(&app_id) {
                             runtime.install = InstallState::Idle;
                         }
+                        self.auto_icons.remove(&app_id);
+                        self.pending_icons.remove(&app_id);
+                        self.icon_cache.clear();
 
                         match self.paths.save_manifest(&self.manifest) {
                             Ok(()) => {
@@ -851,6 +996,7 @@ impl PrismaDockApp {
                                 );
                             }
                         }
+                        self.queue_app_icon(&app_id);
                     }
                     Err(error) => {
                         if let Some(runtime) = self.runtime.get_mut(&app_id) {
@@ -868,6 +1014,23 @@ impl PrismaDockApp {
                     }
                 }
             }
+            Event::IconReady { app_id, path } => {
+                self.pending_icons.remove(&app_id);
+                if self
+                    .manifest
+                    .app(&app_id)
+                    .is_some_and(|app| app.icon_path.is_none())
+                {
+                    match path {
+                        Some(path) => {
+                            self.auto_icons.insert(app_id, path);
+                        }
+                        None => {
+                            self.auto_icons.remove(&app_id);
+                        }
+                    }
+                }
+            }
             Event::SyncResult { result } => {
                 self.worker_busy = false;
                 match result {
@@ -879,6 +1042,8 @@ impl PrismaDockApp {
                         self.runtime.clear();
                         self.sync_runtime();
                         self.icon_cache.clear();
+                        self.auto_icons.clear();
+                        self.pending_icons.clear();
                         self.add_modal = None;
 
                         let save_error = self.paths.save_manifest(&self.manifest).err();
@@ -907,6 +1072,7 @@ impl PrismaDockApp {
                                 modal.sync_status = Some((true, message));
                             }
                         }
+                        self.queue_missing_icons();
                     }
                     Err(error) => {
                         self.notify(StatusKind::Error, error.clone());
@@ -924,15 +1090,29 @@ impl PrismaDockApp {
         ctx: &egui::Context,
         app: &AppEntry,
     ) -> Option<TextureHandle> {
-        let icon_path = app.icon_path.as_deref()?;
-        let path = self.paths.resolve_icon_path(icon_path);
-        let key = path.to_string_lossy().into_owned();
+        if let Some(icon_path) = app.icon_path.as_deref() {
+            let path = self.paths.resolve_icon_path(icon_path);
+            if let Some(texture) = self.load_icon_texture(ctx, &app.id, &path) {
+                return Some(texture);
+            }
+        }
 
+        let path = self.auto_icons.get(&app.id)?.clone();
+        self.load_icon_texture(ctx, &app.id, &path)
+    }
+
+    fn load_icon_texture(
+        &mut self,
+        ctx: &egui::Context,
+        app_id: &str,
+        path: &Path,
+    ) -> Option<TextureHandle> {
+        let key = path.to_string_lossy().into_owned();
         if let Some(cached) = self.icon_cache.get(&key) {
             return cached.clone();
         }
 
-        let loaded = load_custom_icon(ctx, &app.id, &path);
+        let loaded = load_custom_icon(ctx, app_id, path);
         self.icon_cache.insert(key, loaded.clone());
         loaded
     }
